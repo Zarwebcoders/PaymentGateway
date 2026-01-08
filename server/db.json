@@ -1,3 +1,24 @@
 {
-  "payouts": []
+  "payouts": [
+    {
+      "txn_id": "PAYOUT_MK5HR4NJ",
+      "amount": 502,
+      "beneficiary_name": "ABC",
+      "account_number": "123456789010",
+      "ifsc_code": "BAGARDIA045",
+      "status": "pending",
+      "gateway_name": "payraizen",
+      "created_at": "2026-01-08T13:36:46.927Z"
+    },
+    {
+      "txn_id": "PAYOUT_MK5HRHZ5",
+      "amount": 502,
+      "beneficiary_name": "ABC",
+      "account_number": "123456789010",
+      "ifsc_code": "BAGARDIA045",
+      "status": "pending",
+      "gateway_name": "payraizen",
+      "created_at": "2026-01-08T13:37:04.193Z"
+    }
+  ]
 }
