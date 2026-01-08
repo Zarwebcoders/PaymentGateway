@@ -191,7 +191,7 @@ app.post('/api/payin/create', async (req, res) => {
 
     try {
         const response = await axios.post(
-            'https://partner.payraizen.com/tech/api/collection/upi-intent',
+            'https://partner.payraizen.com/tech/api/payin/create_intent',
             payload,
             {
                 headers: {

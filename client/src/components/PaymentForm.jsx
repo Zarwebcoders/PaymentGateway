@@ -49,8 +49,10 @@ const PaymentForm = ({ onTransactionComplete }) => {
             }
         } catch (error) {
             console.error('Payment Error:', error);
+            const serverMsg = error.response?.data?.message;
+            const gatewayErr = error.response?.data?.gateway_error ? JSON.stringify(error.response.data.gateway_error) : '';
+            setMessage(serverMsg ? `${serverMsg} ${gatewayErr}` : 'Server error. Please try again.');
             setStatus('error');
-            setMessage(error.response?.data?.message || 'Server error. Please try again.');
         } finally {
             setLoading(false);
         }
