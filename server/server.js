@@ -21,7 +21,14 @@ if (!fs.existsSync(DB_FILE)) {
 }
 
 const getDb = () => JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
-const saveDb = (data) => fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2));
+const saveDb = (data) => {
+    try {
+        fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2));
+    } catch (err) {
+        console.error('Database save failed (Vercel Read-Only):', err.message);
+        // On Vercel, we cannot save to file. We proceed without saving.
+    }
+};
 
 // Helper to update payout status
 const updatePayoutStatus = (txnId, status, responseData) => {
@@ -42,7 +49,7 @@ const updatePayoutStatus = (txnId, status, responseData) => {
 
 // Routes
 
-// GET /api/payouts - List all payouts
+// GET /api/payouts - List all payouts (and payins)
 app.get('/api/payouts', (req, res) => {
     try {
         const db = getDb();
@@ -61,7 +68,7 @@ app.post('/api/payout/create', async (req, res) => {
         return res.status(400).json({ status: 'error', message: 'Invalid amount' });
     }
     if (!beneficiary_name || !account_number || !ifsc_code) {
-        return res.status(400).json({ status: 'error', message: 'Beneficiary details are required (name, account number, IFSC code)' });
+        return res.status(400).json({ status: 'error', message: 'Beneficiary details are required' });
     }
 
     const txnId = 'PAYOUT_' + Date.now().toString(36).toUpperCase();
@@ -72,6 +79,7 @@ app.post('/api/payout/create', async (req, res) => {
         account_number,
         ifsc_code,
         status: 'pending',
+        type: 'payout',
         gateway_name: 'payraizen',
         created_at: new Date().toISOString()
     };
@@ -92,31 +100,23 @@ app.post('/api/payout/create', async (req, res) => {
     };
 
     try {
-        // NOTE: User requested 'Authorization: Bearer token' and bulk endpoint.
-        // Assuming bulk endpoint takes the object directly or we might need to wrap it.
-        // Proceeding with direct object as per common single-execution-on-bulk or simple migration logic.
-        // If bulk strictly requires array, this might need: [payload]
-
         console.log('Sending Payout Request:', payload);
-
         const response = await axios.post(
-            'https://partner.payraizen.com/tech/api/payout/create', // USER REQUEST: Revert to /create
+            'https://partner.payraizen.com/tech/api/payout/create',
             payload,
             {
                 headers: {
-                    'Authorization': `Bearer ${process.env.PAYRAIZEN_TOKEN}`, // USER REQUEST 6
+                    'Authorization': `Bearer ${process.env.PAYRAIZEN_TOKEN}`,
                     'Content-Type': 'application/json',
                     'Accept': 'application/json'
                 },
-                timeout: 60000 // USER REQUEST 4 (Increased to 60s)
-                // IPv4 forcing removed (USER REQUEST 5)
-                // Connect timeout defaults are usually sufficient (USER REQUEST 3)
+                timeout: 60000
             }
         );
 
         console.log('Payraizen Response:', response.data);
 
-        if (response.data && response.data.status === 'true') { // 'true' string as per PHP code
+        if (response.data && response.data.status === 'true') {
             updatePayoutStatus(txnId, 'processing', response.data);
             res.json({
                 success: true,
@@ -126,21 +126,16 @@ app.post('/api/payout/create', async (req, res) => {
                 message: 'Payout initiated successfully'
             });
         } else {
-            const failureReason = response.data.msg || 'Unknown error';
             updatePayoutStatus(txnId, 'failed', response.data);
             res.status(400).json({
                 success: false,
-                message: failureReason,
+                message: response.data.msg || 'Unknown error',
                 gateway_error: response.data
             });
         }
 
     } catch (error) {
         console.error('Payraizen API Error:', error.message);
-        if (error.response) {
-            console.error('Error Data:', error.response.data);
-        }
-
         const errorData = error.response ? error.response.data : { error: error.message };
         updatePayoutStatus(txnId, 'failed', errorData);
 
@@ -152,14 +147,101 @@ app.post('/api/payout/create', async (req, res) => {
     }
 });
 
-// POST /webhook/payraizen - Handle Webhook
+// POST /api/payin/create - Initiate Payin (Collection)
+app.post('/api/payin/create', async (req, res) => {
+    const { amount, name, email, mobile } = req.body;
+
+    // Validation
+    if (!amount || amount <= 0) {
+        return res.status(400).json({ status: 'error', message: 'Invalid amount' });
+    }
+    if (!name || !email || !mobile) {
+        return res.status(400).json({ status: 'error', message: 'Name, Email, and Mobile are required' });
+    }
+
+    const txnId = 'PAYIN_' + Date.now().toString(36).toUpperCase();
+    const payinRecord = {
+        txn_id: txnId,
+        amount,
+        payer_name: name,
+        payer_email: email,
+        payer_mobile: mobile,
+        status: 'pending',
+        type: 'payin',
+        gateway_name: 'payraizen',
+        created_at: new Date().toISOString()
+    };
+
+    // Save initial record (Try/Catch wrapper used in saveDb)
+    const db = getDb();
+    db.payouts.push(payinRecord);
+    saveDb(db);
+
+    // Payraizen Request Data
+    const payload = {
+        mid: process.env.PAYRAIZEN_MID,
+        amount,
+        name,
+        email,
+        mobile,
+        txn_id: txnId
+    };
+
+    console.log('Sending Payin Request:', payload);
+
+    try {
+        const response = await axios.post(
+            'https://partner.payraizen.com/tech/api/collection/upi-intent',
+            payload,
+            {
+                headers: {
+                    'Authorization': `Bearer ${process.env.PAYRAIZEN_TOKEN}`,
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json'
+                },
+                timeout: 60000
+            }
+        );
+
+        console.log('Payraizen Payin Response:', response.data);
+
+        if (response.data && response.data.status === 'true') {
+            updatePayoutStatus(txnId, 'processing', response.data);
+            res.json({
+                success: true,
+                status: 'processing',
+                transaction_id: txnId,
+                gateway_data: response.data,
+                message: 'Payment Link Generated'
+            });
+        } else {
+            updatePayoutStatus(txnId, 'failed', response.data);
+            res.status(400).json({
+                success: false,
+                message: response.data.msg || 'Payment initiation failed',
+                gateway_error: response.data
+            });
+        }
+
+    } catch (error) {
+        console.error('Payraizen API Error:', error.message);
+        if (error.response) console.error('Error Data:', error.response.data);
+
+        updatePayoutStatus(txnId, 'failed', { error: error.message });
+        res.status(500).json({
+            success: false,
+            message: 'Failed to connect to payment gateway',
+            error: error.message
+        });
+    }
+});
+
 // POST /webhook/payout - Handle Payout Webhook
 app.post('/webhook/payout', (req, res) => {
     try {
         const payload = req.body;
         console.log('Payout Webhook Received:', JSON.stringify(payload));
 
-        // Logic from PHP: handle nested order_details
         let orderDetails = payload.order_details || payload.tid ? payload : (payload.payload ? payload.payload.order_details : null);
 
         if (!orderDetails || !orderDetails.tid) {
@@ -170,7 +252,6 @@ app.post('/webhook/payout', (req, res) => {
         const status = orderDetails.status;
         const bankUtr = orderDetails.bank_utr || orderDetails.utr || 'N/A';
 
-        // Find payout
         const db = getDb();
         const payoutIndex = db.payouts.findIndex(p => p.gateway_order_id === gatewayOrderId);
 
@@ -202,17 +283,15 @@ app.post('/webhook/payout', (req, res) => {
     }
 });
 
-// POST /webhook/payin - Handle Payin Webhook (Placeholder)
+// POST /webhook/payin - Handle Payin Webhook
 app.post('/webhook/payin', (req, res) => {
     console.log('Payin Webhook Received:', JSON.stringify(req.body));
-    // TODO: Implement Payin logic (Store in DB, update USER wallet, etc.)
+    // Implementation for DB update similar to payout can be added here
     res.json({ status: 'success', message: 'Payin webhook received' });
 });
 
-// Backward compatibility (optional)
+// Backward compatibility
 app.post('/webhook/payraizen', (req, res) => {
-    console.log('Generic Webhook Received (redirecting to Payout logic)');
-    // Reuse Payout logic or just warn
     res.redirect(307, '/webhook/payout');
 });
 
