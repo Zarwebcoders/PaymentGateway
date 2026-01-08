@@ -1,0 +1,23 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer utilities {
+  .glass-panel {
+    @apply bg-cyber-gray/50 backdrop-blur-md border border-white/10 shadow-xl;
+  }
+  .neon-border {
+    @apply border border-cyber-accent/50 shadow-[0_0_10px_rgba(0,243,255,0.2)];
+  }
+  .input-field {
+    @apply w-full bg-cyber-black/50 border border-white/10 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-cyber-accent focus:ring-1 focus:ring-cyber-accent transition-all duration-300;
+  }
+  .btn-primary {
+    @apply w-full bg-gradient-to-r from-cyber-primary to-cyber-accent text-white font-bold py-3 px-6 rounded-lg hover:shadow-[0_0_20px_rgba(0,243,255,0.4)] transition-all duration-300 transform hover:-translate-y-1;
+  }
+}
+
+body {
+    background-color: #050505;
+    background-image: radial-gradient(circle at 50% 10%, #1a1a1a 0%, #050505 40%);
+}

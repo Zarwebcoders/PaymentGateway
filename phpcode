@@ -1,0 +1,332 @@
+public function createPayraizenPayout()
+    {
+        $request = \Config\Services::request();
+        // Try to get vendor_id from session or input
+        $vendorId = session()->get('id');
+        $input = $request->getJSON(true);
+        if (!$vendorId && isset($input['vendor_id'])) {
+            $vendorId = $input['vendor_id'];
+        }
+        if (!$vendorId) {
+            return $this->failUnauthorized('Vendor authentication failed.');
+        }
+        // Validate required fields
+        $amount = $input['amount'] ?? 0;
+        $beneficiaryName = $input['beneficiary_name'] ?? null;
+        $accountNumber = $input['account_number'] ?? null;
+        $ifscCode = $input['ifsc_code'] ?? null;
+        $bankName = $input['bank_name'] ?? null;
+        if ($amount <= 0) {
+            return $this->fail('Invalid amount.');
+        }
+        if (!$beneficiaryName || !$accountNumber || !$ifscCode) {
+            return $this->fail('Beneficiary details are required (name, account number, IFSC code).');
+        }
+        // Get vendor details
+        $vendorModel = new \App\Models\VendorModel();
+        $vendor = $vendorModel->find($vendorId);
+        if (!$vendor) {
+            return $this->failNotFound('Vendor not found.');
+        }
+        // Check if vendor has sufficient balance (optional - implement based on your business logic)
+        // if ($vendor['balance'] < $amount) {
+        //     return $this->fail('Insufficient balance.');
+        // }
+        // Payraizen credentials
+        $merchantId = '25'; // Your actual merchant ID
+        $token = 'oE39Gq3Gkcv2gTvz8hePLi3cG4KVbc0Q2pkg4B5i'; // Your actual API token
+        // Generate internal transaction ID
+        $txnId = 'PAYOUT_' . strtoupper(uniqid());
+        // Create pending payout record
+        $payoutModel = new \App\Models\PayoutModel();
+        $payoutData = [
+            'vendor_id' => $vendorId,
+            'amount' => $amount,
+            'txn_id' => $txnId,
+            'beneficiary_name' => $beneficiaryName,
+            'account_number' => $accountNumber,
+            'ifsc_code' => $ifscCode,
+            'bank_name' => $bankName,
+            'status' => 'pending',
+            'method' => 'payraizen_payout',
+            'gateway_name' => 'payraizen',
+            'created_at' => date('Y-m-d H:i:s')
+        ];
+        try {
+            $payoutModel->insert($payoutData);
+        } catch (\Exception $e) {
+            return $this->failServerError('Database error: ' . $e->getMessage());
+        }
+        // Prepare Payraizen Payout API request
+        $url = 'https://partner.payraizen.com/tech/api/payout/create';
+        $data = [
+            'beneficiary_name' => $beneficiaryName,
+            'account_number' => $accountNumber,
+            'ifsc_code' => $ifscCode,
+            'bank_name' => $bankName ?? 'Unknown',
+            'amount' => $amount,
+            'mid' => $merchantId,
+            'txn_id' => $txnId
+        ];
+        $headers = [
+            'Authorization: ' . $token,  // Payraizen expects token directly, no "Bearer" prefix
+            'Content-Type: application/json',
+            'accept: application/json'
+        ];
+        // Make API call to Payraizen
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, $url);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
+        // Timeout settings
+        curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 15);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+        // Force IPv4
+        curl_setopt($ch, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
+        // SSL settings
+        $verifySSL = getenv('PAYRAIZEN_VERIFY_SSL') !== 'false';
+        if ($verifySSL) {
+            curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
+            curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 2);
+        } else {
+            curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+            curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 0);
+        }
+        log_message('info', 'Payraizen Payout Request - URL: ' . $url . ', Data: ' . json_encode($data));
+        $response = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $curlError = curl_error($ch);
+        $curlErrno = curl_errno($ch);
+        curl_close($ch);
+        // Check for cURL errors
+        if ($curlError) {
+            log_message('error', 'Payraizen Payout cURL Error: ' . $curlError);
+            // Update payout status to failed
+            try {
+                $payout = $payoutModel->where('txn_id', $txnId)->first();
+                $payoutModel->update($payout['id'], [
+                    'status' => 'failed',
+                    'failure_reason' => $curlError,
+                    'gateway_response' => json_encode(['curl_error' => $curlError, 'curl_errno' => $curlErrno])
+                ]);
+            } catch (\Exception $e) {
+                log_message('error', 'Failed to update payout status: ' . $e->getMessage());
+            }
+            return $this->fail([
+                'message' => 'Failed to connect to payout gateway',
+                'error' => $curlError
+            ], 500);
+        }
+        log_message('info', 'Payraizen Payout Response: ' . $response);
+        $responseData = json_decode($response, true);
+        if (isset($responseData['status']) && $responseData['status'] === 'true') {
+            $gatewayOrderId = $responseData['order_details']['tid'] ?? null;
+            // Update payout record with gateway order ID
+            try {
+                $payout = $payoutModel->where('txn_id', $txnId)->first();
+                $payoutModel->update($payout['id'], [
+                    'gateway_order_id' => $gatewayOrderId,
+                    'gateway_response' => json_encode($responseData),
+                    'status' => 'processing'
+                ]);
+            } catch (\Exception $e) {
+                log_message('error', 'Failed to update payout with gateway order ID: ' . $e->getMessage());
+            }
+            return $this->respond([
+                'success' => true,
+                'status' => 'processing',
+                'transaction_id' => $txnId,
+                'gateway_order_id' => $gatewayOrderId,
+                'message' => 'Payout initiated successfully',
+                'payout_info' => [
+                    'amount' => $amount,
+                    'beneficiary_name' => $beneficiaryName,
+                    'account_number' => substr($accountNumber, -4) // Only show last 4 digits
+                ]
+            ]);
+        } else {
+            // Update payout status to failed
+            try {
+                $payout = $payoutModel->where('txn_id', $txnId)->first();
+                $payoutModel->update($payout['id'], [
+                    'status' => 'failed',
+                    'failure_reason' => $responseData['msg'] ?? 'Unknown error',
+                    'gateway_response' => json_encode($responseData)
+                ]);
+            } catch (\Exception $e) {
+                log_message('error', 'Failed to update payout status: ' . $e->getMessage());
+            }
+            $errorMessage = $responseData['msg'] ?? $responseData['message'] ?? 'Payout initiation failed.';
+            return $this->fail([
+                'message' => $errorMessage,
+                'gateway_error' => $responseData
+            ], $httpCode >= 400 ? $httpCode : 400);
+        }
+    }
+    /**
+     * Handle Payraizen Payout Webhook
+     * Processes payout status updates from Payraizen
+     */
+    public function handlePayraizenPayoutWebhook()
+    {
+        $request = \Config\Services::request();
+        try {
+            // Get raw input for logging
+            $rawInput = file_get_contents('php://input');
+            log_message('info', 'Payraizen Payout Webhook Raw Input: ' . $rawInput);
+            // Get the JSON payload
+            $payload = $request->getJSON(true);
+            if (empty($payload)) {
+                $payload = $request->getPost();
+                log_message('info', 'Payraizen Payout Webhook using POST data instead of JSON');
+            }
+            log_message('info', 'Payraizen Payout Webhook Received ' . json_encode($payload));
+            // Handle nested payload structure
+            $orderDetails = null;
+            if (isset($payload['order_details'])) {
+                $orderDetails = $payload['order_details'];
+            } elseif (isset($payload['tid'])) {
+                $orderDetails = $payload;
+            } elseif (isset($payload['payload']['order_details'])) {
+                $orderDetails = $payload['payload']['order_details'];
+            }
+            if (!$orderDetails) {
+                log_message('error', 'Payraizen Payout Webhook Error: Missing order_details');
+                return $this->respond([
+                    'status' => 'error',
+                    'message' => 'Invalid payload: Missing order_details'
+                ]);
+            }
+            $status = $orderDetails['status'] ?? null;
+            if (!isset($orderDetails['tid'])) {
+                log_message('error', 'Payraizen Payout Webhook Error: Missing tid');
+                return $this->respond([
+                    'status' => 'error',
+                    'message' => 'Invalid payload: Missing tid'
+                ]);
+            }
+            $gatewayOrderId = $orderDetails['tid'];
+            $bankUtr = $orderDetails['bank_utr'] ?? $orderDetails['utr'] ?? 'N/A';
+            $amount = $orderDetails['amount'] ?? 0;
+            log_message('info', 'Payraizen Payout Webhook Processing: TID=' . $gatewayOrderId . ', Status=' . $status . ', UTR=' . $bankUtr);
+            // Find payout by gateway order ID
+            $payoutModel = new \App\Models\PayoutModel();
+            $payout = $payoutModel->where('gateway_order_id', $gatewayOrderId)->first();
+            if (!$payout) {
+                log_message('error', 'Payraizen Payout Webhook Error: Payout not found for gateway order ID: ' . $gatewayOrderId);
+                // Try to find by amount and recent timestamp
+                $recentTime = date('Y-m-d H:i:s', strtotime('-30 minutes'));
+                $payout = $payoutModel
+                    ->where('amount', $amount)
+                    ->where('gateway_name', 'payraizen')
+                    ->where('created_at >=', $recentTime)
+                    ->where('status', 'processing')
+                    ->orderBy('created_at', 'DESC')
+                    ->first();
+                if ($payout) {
+                    log_message('info', 'Payraizen Payout Webhook: Found payout by amount matching - TXN: ' . $payout['txn_id']);
+                    $payoutModel->update($payout['id'], ['gateway_order_id' => $gatewayOrderId]);
+                } else {
+                    log_message('error', 'Payraizen Payout Webhook: No matching payout found');
+                    return $this->respond([
+                        'status' => 'accepted',
+                        'message' => 'Payout not found but webhook acknowledged'
+                    ]);
+                }
+            }
+            // Update payout status based on webhook
+            $updateData = [
+                'gateway_response' => json_encode($payload),
+                'updated_at' => date('Y-m-d H:i:s')
+            ];
+            if ($status === 'success' || $status === 'completed') {
+                $updateData['status'] = 'completed';
+                $updateData['utr'] = $bankUtr;
+                $updateData['completed_at'] = date('Y-m-d H:i:s');
+                $updateData['verify_source'] = 'payraizen_webhook';
+                // Optional: Update vendor balance (deduct the payout amount)
+                // $vendorModel = new \App\Models\VendorModel();
+                // $vendorModel->decrement('balance', $payout['vendor_id'], $amount);
+            } elseif ($status === 'failed' || $status === 'failure') {
+                $updateData['status'] = 'failed';
+                $updateData['failure_reason'] = $orderDetails['failure_reason'] ?? 'Payout failed';
+                // Optional: Refund vendor balance if it was deducted
+                // $vendorModel = new \App\Models\VendorModel();
+                // $vendorModel->increment('balance', $payout['vendor_id'], $amount);
+            } else {
+                log_message('warning', 'Payraizen Payout Webhook: Unknown status received: ' . $status);
+            }
+            try {
+                $payoutModel->update($payout['id'], $updateData);
+                log_message('info', 'Payraizen Payout Webhook: Payout updated successfully - TXN: ' . $payout['txn_id'] . ', Status: ' . ($updateData['status'] ?? 'unknown') . ', UTR: ' . $bankUtr);
+                return $this->respond([
+                    'status' => 'success',
+                    'message' => 'Payout status updated successfully',
+                    'transaction_id' => $payout['txn_id']
+                ]);
+            } catch (\Exception $e) {
+                log_message('error', 'Payraizen Payout Webhook Error: Database update failed - ' . $e->getMessage());
+                return $this->respond([
+                    'status' => 'error',
+                    'message' => 'Database error but webhook acknowledged',
+                    'error' => $e->getMessage()
+                ]);
+            }
+        } catch (\Exception $e) {
+            log_message('error', 'Payraizen Payout Webhook Error: ' . $e->getMessage() . ' | Trace: ' . $e->getTraceAsString());
+            return $this->respond([
+                'status' => 'error',
+                'message' => 'Webhook acknowledged with error',
+                'error' => $e->getMessage()
+            ]);
+        }
+    }
+    /**
+     * Test Payraizen Webhook
+     * Debugging endpoint to test webhook functionality
+     */
+    public function testPayraizenWebhook()
+    {
+        $paymentModel = new \App\Models\PaymentModel();
+        // Get recent Payraizen payments
+        $recentPayments = $paymentModel
+            ->where('gateway_name', 'payraizen')
+            ->orderBy('created_at', 'DESC')
+            ->limit(5)
+            ->find();
+        $output = [
+            'status' => 'test',
+            'message' => 'Payraizen Webhook Test Endpoint',
+            'webhook_url' => base_url('api/payment/payraizen/webhook'),
+            'recent_payments' => $recentPayments,
+            'test_payload' => [
+                'status' => 'true',
+                'msg' => 'Payin Webhook',
+                'order_details' => [
+                    'amount' => 516,
+                    'bank_utr' => 'TEST_UTR_' . time(),
+                    'status' => 'success',
+                    'tid' => $recentPayments[0]['gateway_order_id'] ?? 'NO_RECENT_PAYMENT',
+                    'mid' => 'lysCjB0iJe',
+                    'payee_vpa' => 'UPI'
+                ]
+            ],
+            'curl_command' => "curl -X POST " . base_url('api/payment/payraizen/webhook') . " \\\n" .
+                "  -H 'Content-Type: application/json' \\\n" .
+                "  -d '" . json_encode([
+                    'status' => 'true',
+                    'msg' => 'Payin Webhook',
+                    'order_details' => [
+                        'amount' => 516,
+                        'bank_utr' => 'TEST_UTR_' . time(),
+                        'status' => 'success',
+                        'tid' => $recentPayments[0]['gateway_order_id'] ?? 'NO_RECENT_PAYMENT',
+                        'mid' => 'lysCjB0iJe',
+                        'payee_vpa' => 'UPI'
+                    ]
+                ]) . "'"
+        ];
+        return $this->respond($output);
+    }
