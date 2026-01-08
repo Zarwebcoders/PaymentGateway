@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import axios from 'axios';
 import { Send, User, Smartphone, Mail, AlertCircle, CheckCircle, Loader2 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
-import QRCode from 'qrcode.react';
+import { QRCodeCanvas } from 'qrcode.react';
 
 const PaymentForm = ({ onTransactionComplete }) => {
     const [formData, setFormData] = useState({
@@ -170,7 +170,7 @@ const PaymentForm = ({ onTransactionComplete }) => {
                             animate={{ scale: 1, opacity: 1 }}
                             className="flex flex-col items-center justify-center p-4 bg-white rounded-xl mt-4"
                         >
-                            <QRCode value={qrData} size={200} />
+                            <QRCodeCanvas value={qrData} size={200} />
                             <p className="text-gray-900 font-bold mt-2 text-sm text-center">Scan with any UPI App</p>
                             <p className="text-xs text-gray-500 font-mono break-all text-center mt-1 px-2">{qrData}</p>
                         </motion.div>
