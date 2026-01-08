@@ -179,12 +179,11 @@ app.post('/api/payin/create', async (req, res) => {
 
     // Payraizen Request Data
     const payload = {
-        mid: process.env.PAYRAIZEN_MID,
+        mid: txnId, // API expects Unique ID here (Merchant Invoice ID), not Account ID
         amount,
         name,
         email,
-        mobile,
-        txn_id: txnId
+        mobile
     };
 
     console.log('Sending Payin Request:', payload);
