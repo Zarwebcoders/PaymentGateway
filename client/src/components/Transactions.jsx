@@ -74,9 +74,11 @@ const TransactionHistory = ({ refreshTrigger }) => {
                         </tr>
                     </thead>
                     <tbody className="text-sm">
-                        {transactions.length === 0 ? (
+                        {(!Array.isArray(transactions) || transactions.length === 0) ? (
                             <tr>
-                                <td colSpan="5" className="p-8 text-center text-gray-500">No transactions found</td>
+                                <td colSpan="5" className="p-8 text-center text-gray-500">
+                                    {loading ? 'Loading...' : 'No transactions found'}
+                                </td>
                             </tr>
                         ) : (
                             transactions.map((txn, index) => (
